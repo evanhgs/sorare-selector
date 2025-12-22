@@ -5,7 +5,7 @@
 
 ## Vue d'ensemble
 
-**Version:** 1.2.0  
+**Version:** 1.2.1  
 **Documentation interactive:** `/docs` (Swagger UI) ou `/redoc` (ReDoc)
 
 ---
