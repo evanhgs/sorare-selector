@@ -11,7 +11,7 @@ from models import TeamOptimizationResult, PlayersRequest, Player, SelectedPlaye
 
 app = FastAPI(
     title="NBA Team Optimizer",
-    version="1.0.0",
+    version="1.1.0",
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json"
@@ -31,7 +31,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 async def root():
     return {
         "message": "NBA Team Optimizer API",
-        "version": "1.0.1",
+        "version": "1.1.0",
         "endpoints": {
             "health check": "/health",
             "docs url": "/docs",
@@ -81,11 +81,19 @@ async def find_best_composition(
     forced_players = request.forced_players or []
     is_mvp = request.is_mvp or False
 
-    # Validation des paramètres
-    if players is None or cost is None or team_size is None or minimum_stars is None:
-        raise HTTPException(
-            status_code=400,
-            detail="Les paramètres players, cost, team_size et minimum_stars sont requis"
+    missing_fields = [
+        name for name, val in (
+            ('players', players),
+            ('cost', cost),
+            ('team_size', team_size),
+            ('minimum_stars', minimum_stars)
+        ) if val is None
+    ]
+    if missing_fields:
+        raise _exception_handler(
+            message='Les paramètres requis sont manquants',
+            error_code='missing_parameters',
+            context={'Champs manquants': missing_fields}
         )
 
     n = len(players)
@@ -107,15 +115,25 @@ async def find_best_composition(
     # Validation des joueurs forcés
     if len(forced_team) != len(forced_players):
         missing = set(forced_players) - {p.name for p in forced_team}
-        raise HTTPException(
-            status_code=400,
-            detail=f"Joueurs forcés introuvables : {missing}"
+        raise _exception_handler(
+            message='Un ou plusieurs joueurs forcés n\'ont pas été trouvé dans la base de joueur',
+            error_code='forced_players_not_found',
+            context={
+                'forced_players_not_found': forced_players,
+                'missing': missing,
+                'available_player_names_sample': [p.name for p in players[:10]]
+            }
         )
 
     if len(forced_team) > team_size:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Trop de joueurs forcés ({len(forced_team)}) pour une équipe de {team_size}"
+        raise _exception_handler(
+            message='Trop de joueur sont forcés comparés à la taille de la team demandé',
+            error_code="too_many_forced_players",
+            context={
+                'forced_count': len(forced_team),
+                'team_size': team_size,
+                'forced_players': [p.name for p in forced_team]
+            }
         )
 
     # Calcul des contraintes restantes après joueurs forcés
@@ -134,10 +152,15 @@ async def find_best_composition(
     # puis il y a le statut qui dit si c'est faisable ou non, avec des joueurs forcés trop fort en cout
 
     if remaining_stars_needed > remaining_slots:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Impossible d'atteindre {minimum_stars} stars. "
-                   f"Forcés: {forced_stars}, Places restantes: {remaining_slots}"
+        raise _exception_handler(
+            message='Impossible de déterminer le nombre d’étoiles requis avec les emplacements restants',
+            error_code='insufficient_stars_possible',
+            context={
+                'minimum_stars': minimum_stars,
+                'forced_stars': forced_stars,
+                'remaining_stars_needed': remaining_stars_needed,
+                'remaining_slots': remaining_slots
+            }
         )
 
     # ============================================================================
@@ -260,11 +283,17 @@ async def find_best_composition(
     status = LpStatus[prob.status]
 
     if status != 'Optimal':
-        raise HTTPException(
-            status_code=400,
-            detail=f"Aucune solution optimale trouvée. Statut: {status}. "
-                   f"Vérifiez les contraintes (budget restant: {remaining_budget}, "
-                   f"places restantes: {remaining_slots}, stars nécessaires: {remaining_stars_needed})"
+        infeasible_context = {
+            'lp_status': status,
+            'remaining_budget': remaining_budget,
+            'remaining_slots': remaining_stars_needed,
+            'forced_players': [p.name for p in forced_team],
+            'available_count': len(available_players)
+        }
+        raise _exception_handler(
+            message='Aucune solution optimale trouvée pour les contraintes données',
+            error_code='no_optimal_solution',
+            context=infeasible_context
         )
 
     # ============================================================================
@@ -320,9 +349,11 @@ async def find_top_n_compositions(
         HTTPException: Si les paramètres sont invalides ou aucune solution trouvée
     """
     if n < 1 or n > 100:
-        raise HTTPException(
-            status_code=400,
-            detail="Le paramètre n doit être entre 1 et 100"
+        # a voir avec toi si je rajoute dans la requete ou je laisse telle quelle
+        raise _exception_handler(
+            message='Le paramètre `n` doit être un entier compris entre 1 et 100',
+            error_code='invalid_n',
+            context={'provided_n': n}
         )
 
     players = request.players
@@ -332,25 +363,37 @@ async def find_top_n_compositions(
     forced_players = request.forced_players or []
     is_mvp = request.is_mvp or False
 
-    # Validation des paramètres
-    if players is None or cost is None or team_size is None or minimum_stars is None:
-        raise HTTPException(
-            status_code=400,
-            detail="Les paramètres players, cost, team_size et minimum_stars sont requis"
+    missing_fields = [
+        name for name, val in (
+            ("players", players),
+            ("cost", cost),
+            ("team_size", team_size),
+            ("minimum_stars", minimum_stars)
+        ) if val is None
+    ]
+    if missing_fields:
+        raise _exception_handler(
+            message='Des paramètres requis sont manquants pour le calcul du top-n',
+            error_code='missing_parameters_top_n',
+            context={'missing_fields': missing_fields}
         )
 
     results: List[Union[TeamOptimizationResult, MVPOptimizationResult]] = []
     excluded_combinations: List[Set[str]] = []
 
     # ============================================================================
-    # PRÉTRAITEMENT : Séparation forcés / disponibles (comme avant)
+    # PRÉTRAITEMENT : Séparation forcée / disponibles (comme avant)
     # ============================================================================
     forced_team, available_players, validation_result = _preprocess_forced_players(
         players, forced_players, team_size, cost, minimum_stars
     )
 
     if validation_result:  # Erreur de validation
-        raise HTTPException(status_code=400, detail=validation_result)
+        raise _exception_handler(
+            message='La validation a échoué pour les joueurs forcés ou les contraintes',
+            error_code='preprocess_validation_failed',
+            context={'detail': validation_result}
+        )
 
     remaining_budget = cost - sum(p.cost for p in forced_team)
     remaining_stars_needed = max(0, minimum_stars - sum(1 for p in forced_team if p.is_star))
@@ -401,9 +444,15 @@ async def find_top_n_compositions(
             break
 
     if not results:
-        raise HTTPException(
-            status_code=400,
-            detail="Aucune composition valide trouvée avec les contraintes données"
+        raise _exception_handler(
+            message='Aucune composition valide trouvée avec les contraintes fournies',
+            error_code='no_compositions_found',
+            context={
+                'requested_n': n,
+                'remaining_budget': remaining_budget,
+                'remaining_slots': remaining_slots,
+                'remaining_stars_needed': remaining_stars_needed
+            }
         )
 
     return TopNResult(
@@ -666,3 +715,15 @@ def _build_result(
             status=status
         )
 
+def _exception_handler(
+        message: str,
+        error_code: str='invalid_request',
+        context: Optional[Dict[str, Any]] = None,
+) -> HTTPException:
+    detail: Dict[str, Any] = {
+        'error': error_code,
+        'message': message
+    }
+    if context:
+        detail['context']=context
+    return HTTPException(status_code=400, detail=detail)
