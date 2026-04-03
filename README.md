@@ -5,7 +5,7 @@
 
 ## Vue d'ensemble
 
-**Version:** 1.1.0  
+**Version:** 1.2.0  
 **Documentation interactive:** `/docs` (Swagger UI) ou `/redoc` (ReDoc)
 
 ---
@@ -40,7 +40,6 @@ Trouve la meilleure composition d'équipe NBA en maximisant le score total.
 
 ##### Mode MVP (`is_mvp: true`)
 - Le joueur avec le coût le plus élevé est **gratuit**
-- Le score des autres joueurs doit être ≤ au score du joueur gratuit
 - Budget ajusté automatiquement
 
 #### Requête

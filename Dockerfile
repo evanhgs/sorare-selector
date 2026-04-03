@@ -18,9 +18,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 FROM python:3.13-slim-bookworm
 
-LABEL maintainer="Evan <evanhugues@proton.me>" \
-      description="NBA Team Optimizer API - FastAPI" \
-      version="1.0.0"
+LABEL maintainer="Evan" \
+      description="Sorare NBA Team Optimizer API - Non affilate to Sorare Inc" \
+      version="1.2.0"
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
