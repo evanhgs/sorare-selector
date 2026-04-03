@@ -20,7 +20,7 @@ FROM python:3.13-slim-bookworm
 
 LABEL maintainer="Evan" \
       description="Sorare NBA Team Optimizer API - Non affilate to Sorare Inc" \
-      version="1.2.0"
+      version="1.2.1"
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

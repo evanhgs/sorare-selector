@@ -11,7 +11,7 @@ from models import TeamOptimizationResult, PlayersRequest, Player, SelectedPlaye
 
 app = FastAPI(
     title="NBA Team Optimizer",
-    version="1.1.0",
+    version="1.2.1",
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json"
@@ -60,6 +60,7 @@ async def find_best_composition(
 
     Mode MVP (is_mvp=True):
     - Le joueur avec le coût le plus élevé est gratuit
+    - Le score des autres joueurs doit être <= au score du joueur gratuit
 
     OPTIMISATION : Si des joueurs sont forcés, le problème est réduit aux places restantes
     uniquement, ce qui accélère considérablement la résolution.
@@ -166,13 +167,24 @@ async def find_best_composition(
     # CAS PARTICULIER : Tous les joueurs sont forcés
     # ============================================================================
     if remaining_slots == 0:
-        forced_free_player = max(forced_team, key=lambda p: p.cost) if is_mvp else None
         return _build_result(
             selected_team=forced_team,
-            free_player=forced_free_player,
+            free_player=None,
             is_mvp=is_mvp,
             status="Optimal"
         )
+
+    # ============================================================================
+    # OPTIMISATION MODE MVP : Contrainte sur le score du joueur gratuit
+    # ============================================================================
+    max_forced_score = max((p.score for p in forced_team), default=0) if forced_team else 0
+
+    if is_mvp and forced_team:
+        # En mode MVP, si un joueur forcé existe, il pourrait être le joueur gratuit
+        # On doit donc filtrer les joueurs disponibles selon leur score
+        # MAIS on ne peut pas savoir à l'avance qui sera gratuit, donc on garde tous
+        # et on laisse l'optimisation gérer cette contrainte
+        pass
 
     # ============================================================================
     # RÉSOLUTION DU SOUS-PROBLÈME avec les joueurs disponibles uniquement
@@ -189,15 +201,16 @@ async def find_best_composition(
 
     # Variables spécifiques au mode MVP
     if is_mvp:
-        max_cost = max(
-            max((p.cost for p in available_players), default=0),
-            max((p.cost for p in forced_team), default=0)
+        # Le score max inclut maintenant les joueurs forcés ET disponibles
+        score_max = max(
+            max(p.score for p in available_players) if available_players else 0,
+            max_forced_score
         )
         # y peut cibler les joueurs disponibles OU forcés
         # Pour simplifier, on créé des variables pour disponibles + forcés
         y_available = [LpVariable(f"y_avail_{i}", cat=LpBinary) for i in range(n_available)]
         y_forced = [LpVariable(f"y_forced_{i}", cat=LpBinary) for i in range(len(forced_team))]
-        cost_gratuit = LpVariable("cost_gratuit", lowBound=0, upBound=max_cost)
+        s_gratuit = LpVariable("score_gratuit", lowBound=0, upBound=score_max)
 
     # ============================================================================
     # FONCTION OBJECTIF : Maximiser le score des joueurs disponibles
@@ -214,9 +227,12 @@ async def find_best_composition(
 
     # 2. Contrainte budgétaire
     if is_mvp:
+        # En mode MVP, on doit considérer qu'un joueur sera gratuit
+        # Budget disponible : remaining_budget + coût du joueur gratuit
         prob += (
                 lpSum([available_players[i].cost * x[i] for i in range(n_available)])
-                - cost_gratuit
+                - lpSum([available_players[i].cost * y_available[i] for i in range(n_available)])
+                - lpSum([forced_team[i].cost * y_forced[i] for i in range(len(forced_team))])
                 <= remaining_budget
         ), "Budget_Constraint"
 
@@ -242,20 +258,23 @@ async def find_best_composition(
     # CONTRAINTES SPÉCIFIQUES MODE MVP
     # ============================================================================
     if is_mvp:
-        prob += (
-            cost_gratuit ==
-            lpSum([available_players[i].cost * y_available[i] for i in range(n_available)]) +
-            lpSum([forced_team[i].cost * y_forced[i] for i in range(len(forced_team))])
-        ), "Free_Player_Cost"
-
         # Le joueur gratuit doit être sélectionné (pour les disponibles)
         for i in range(n_available):
             prob += y_available[i] <= x[i], f"Free_Selected_Avail_{i}"
-            prob += available_players[i].cost * x[i] <= cost_gratuit, f"Max_Cost_Avail_{i}"
+            prob += s_gratuit >= available_players[i].score * y_available[i], f"Free_Score_Avail_{i}"
+            prob += (
+                available_players[i].score * x[i] <= s_gratuit + score_max * (1 - x[i]),
+                f"Max_Score_Avail_{i}"
+            )
 
         # Pour les joueurs forcés (toujours sélectionnés)
         for i in range(len(forced_team)):
-            prob += forced_team[i].cost <= cost_gratuit, f"Max_Cost_Forced_{i}"
+            prob += s_gratuit >= forced_team[i].score * y_forced[i], f"Free_Score_Forced_{i}"
+            # Les joueurs forcés doivent aussi respecter la contrainte de score
+            prob += (
+                forced_team[i].score <= s_gratuit + score_max * (1 - y_forced[i]),
+                f"Max_Score_Forced_{i}"
+            )
 
     # ============================================================================
     # RÉSOLUTION
@@ -525,13 +544,14 @@ def _solve_optimization_with_exclusions(
 
     # Variables MVP
     if is_mvp:
-        max_cost = max(
-            max((p.cost for p in available_players), default=0),
-            max((p.cost for p in forced_team), default=0)
+        max_forced_score = max((p.score for p in forced_team), default=0) if forced_team else 0
+        score_max = max(
+            max(p.score for p in available_players) if available_players else 0,
+            max_forced_score
         )
         y_available = [LpVariable(f"y_avail_{i}_iter{iteration}", cat=LpBinary) for i in range(n_available)]
         y_forced = [LpVariable(f"y_forced_{i}_iter{iteration}", cat=LpBinary) for i in range(len(forced_team))]
-        cost_gratuit = LpVariable(f"cost_gratuit_iter{iteration}", lowBound=0, upBound=max_cost)
+        s_gratuit = LpVariable(f"score_gratuit_iter{iteration}", lowBound=0, upBound=score_max)
 
     # Fonction objectif
     prob += lpSum([available_players[i].score * x[i] for i in range(n_available)]), "Total_Score"
@@ -542,7 +562,8 @@ def _solve_optimization_with_exclusions(
     if is_mvp:
         prob += (
                 lpSum([available_players[i].cost * x[i] for i in range(n_available)])
-                - cost_gratuit
+                - lpSum([available_players[i].cost * y_available[i] for i in range(n_available)])
+                - lpSum([forced_team[i].cost * y_forced[i] for i in range(len(forced_team))])
                 <= remaining_budget
         ), "Budget_Constraint"
         prob += (
@@ -563,18 +584,20 @@ def _solve_optimization_with_exclusions(
 
     # Contraintes MVP
     if is_mvp:
-        prob += (
-            cost_gratuit ==
-            lpSum([available_players[i].cost * y_available[i] for i in range(n_available)]) +
-            lpSum([forced_team[i].cost * y_forced[i] for i in range(len(forced_team))])
-        ), "Free_Player_Cost"
-
         for i in range(n_available):
             prob += y_available[i] <= x[i], f"Free_Selected_Avail_{i}"
-            prob += available_players[i].cost * x[i] <= cost_gratuit, f"Max_Cost_Avail_{i}"
+            prob += s_gratuit >= available_players[i].score * y_available[i], f"Free_Score_Avail_{i}"
+            prob += (
+                available_players[i].score * x[i] <= s_gratuit + score_max * (1 - x[i]),
+                f"Max_Score_Avail_{i}"
+            )
 
         for i in range(len(forced_team)):
-            prob += forced_team[i].cost <= cost_gratuit, f"Max_Cost_Forced_{i}"
+            prob += s_gratuit >= forced_team[i].score * y_forced[i], f"Free_Score_Forced_{i}"
+            prob += (
+                forced_team[i].score <= s_gratuit + score_max * (1 - y_forced[i]),
+                f"Max_Score_Forced_{i}"
+            )
 
     # ============================================================================
     # CONTRAINTES D'EXCLUSION : Empêcher les combinaisons déjà trouvées
